@@ -2,11 +2,14 @@
 # -*- coding:utf-8 -*-
 #A GAE web application to aggregate rss and send it to your kindle.
 #Visit https://github.com/cdhigh/KindleEar for the latest version
-#中文讨论贴：http://www.hi-pda.com/forum/viewthread.php?tid=1213082
 #Contributors:
 # rexdf <https://github.com/rexdf>
 
 import hashlib, gettext, datetime
+try:
+    import json
+except ImportError:
+    import simplejson as json
 
 import web
 from apps.BaseHandler import BaseHandler
@@ -28,10 +31,10 @@ class Login(BaseHandler):
                     needs_subscription=False, separate=False)
             myfeeds.put()
             secret_key = new_secret_key()
-            au = KeUser(name='admin', passwd=hashlib.md5('admin'+secret_key).hexdigest(),
+            au = KeUser(name='admin', passwd=hashlib.md5('admin' + secret_key).hexdigest(),
                 kindle_email='', enable_send=False, send_time=8, timezone=TIMEZONE,
                 book_type="mobi", device='kindle', expires=None, ownfeeds=myfeeds, 
-                merge_books=False, secret_key=secret_key)
+                merge_books=False, secret_key=secret_key, expiration_days=0)
             au.put()
             return False
         else:
@@ -49,19 +52,19 @@ class Login(BaseHandler):
         if main.session.get('login') == 1:
             web.seeother(r'/')
         else:
-            return self.render('login.html',"Login",tips=tips)
+            return self.render('login.html', "Login", tips=tips)
         
     def POST(self):
         name, passwd = web.input().get('u'), web.input().get('p')
         if name.strip() == '':
             tips = _("Username is empty!")
-            return self.render('login.html',"Login",nickname='',tips=tips)
+            return self.render('login.html', "Login", nickname='', tips=tips)
         elif len(name) > 25:
             tips = _("The len of username reached the limit of 25 chars!")
-            return self.render('login.html',"Login",nickname='',tips=tips,username=name)
-        elif '<' in name or '>' in name or '&' in name:
+            return self.render('login.html', "Login", nickname='', tips=tips, username=name)
+        elif '<' in name or '>' in name or '&' in name or '\\' in name or '/' in name:
             tips = _("The username includes unsafe chars!")
-            return self.render('login.html',"Login",nickname='',tips=tips)
+            return self.render('login.html', "Login", nickname='', tips=tips)
         
         self.CheckAdminAccount() #确认管理员账号是否存在
         
@@ -75,8 +78,9 @@ class Login(BaseHandler):
         if u:
             main.session.login = 1
             main.session.username = name
-            if u.expires: #用户登陆后自动续期
-                u.expires = datetime.datetime.utcnow()+datetime.timedelta(days=180)
+            if u.expires and u.expiration_days != 0: #用户登陆后自动续期
+                days = 180 if u.expiration_days is None else u.expiration_days #兼容老版本和老账号
+                u.expires = datetime.datetime.utcnow() + datetime.timedelta(days=days)
                 u.put()
             
             #为了兼容性，对于新账号才一次性设置secret_key
@@ -94,15 +98,27 @@ class Login(BaseHandler):
             #1.7新增各用户独立的白名单和URL过滤器，这些处理是为了兼容以前的版本
             if name == 'admin':
                 for wl in WhiteList.all():
-                    if not wl.user:
-                        wl.user = u
-                        wl.put()
+                    try:
+                        if not wl.user:
+                            wl.user = u
+                            wl.put()
+                    except:
+                        pass
                 for uf in UrlFilter.all():
-                    if not uf.user:
-                        uf.user = u
-                        uf.put()
+                    try:
+                        if not uf.user:
+                            uf.user = u
+                            uf.put()
+                    except:
+                        pass
             
+            #1.25.3新增user.remove_hyperlinks
+            if u.remove_hyperlinks is None:
+                u.remove_hyperlinks = 'image'
+                u.put()
+                
             #同步书籍数据库
+            bksToDelete = []
             for bk in Book.all().filter('builtin = ', True):
                 found = False
                 for book in BookClasses():
@@ -116,23 +132,36 @@ class Login(BaseHandler):
                         found = True
                         break
                 
-                #如果删除了内置书籍py文件，则在数据库中也清除
+                #如果删除了内置书籍py文件，则在数据库中也清除相关信息
                 if not found:
                     subs = u.subscription_info(bk.title)
                     if subs:
                         subs.delete()
-                    for fd in bk.feeds:
+                    for fd in list(bk.feeds):
                         fd.delete()
-                    bk.delete()
-                    
-                
-            raise web.seeother(r'/my')
+                    bksToDelete.append(bk)
+
+            #从数据库中删除书籍
+            for bk in bksToDelete:
+                bk.delete()
+            
+            if u.kindle_email:
+                raise web.seeother(r'/my')
+            else:
+                raise web.seeother(r'/setting')
         else:
+            import time
+            time.sleep(5)
             tips = _("The username not exist or password is wrong!")
+            lang = main.session.get('lang')
+            if lang and lang.startswith('zh'):
+                tips += '&nbsp;&nbsp;&nbsp;&nbsp;<a href="/static/faq.html#forgotpwd" target="_blank">' + _('Forgot password?') + '</a>'
+            else:
+                tips += '&nbsp;&nbsp;&nbsp;&nbsp;<a href="/static/faq_en.html#forgotpwd" target="_blank">' + _('Forgot password?') + '</a>'
             main.session.login = 0
             main.session.username = ''
             main.session.kill()
-            return self.render('login.html',"Login",nickname='',tips=tips,username=name)
+            return self.render('login.html', "Login", nickname='', tips=tips, username=name)
 
 class Logout(BaseHandler):
     __url__ = "/logout"
@@ -142,3 +171,10 @@ class Logout(BaseHandler):
         main.session.lang = ''
         main.session.kill()
         raise web.seeother(r'/')
+
+#for ajax parser, if login required, retuan a dict 
+class NeedLoginAjax(BaseHandler):
+    __url__ = "/needloginforajax"
+    def GET(self):
+        web.header('Content-Type', 'application/json')
+        return json.dumps({'status': _('login required')})

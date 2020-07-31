@@ -1,10 +1,10 @@
 application: kindlesubscriber
-module: worker
 version: 1
+module: worker
 runtime: python27
 api_version: 1
 threadsafe: true
-instance_class: B2
+instance_class: B4
 basic_scaling:
   max_instances: 3
   idle_timeout: 30m
@@ -33,6 +33,10 @@ handlers:
 
 - url: /static
   static_dir: static
+  application_readable: true
+
+- url: /images
+  static_dir: images
   application_readable: true
 
 - url: /_ah/mail/.+

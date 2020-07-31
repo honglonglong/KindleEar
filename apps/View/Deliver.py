@@ -2,7 +2,6 @@
 # -*- coding:utf-8 -*-
 #A GAE web application to aggregate rss and send it to your kindle.
 #Visit https://github.com/cdhigh/KindleEar for the latest version
-#中文讨论贴：http://www.hi-pda.com/forum/viewthread.php?tid=1213082
 #Contributors:
 # rexdf <https://github.com/rexdf>
 
@@ -16,51 +15,61 @@ from collections import defaultdict
 from apps.BaseHandler import BaseHandler
 from apps.dbModels import *
 from apps.utils import local_time
-from books import BookClasses, BookClass
+from books import BookClass
 
 class Deliver(BaseHandler):
     """ 判断需要推送哪些书籍 """
     __url__ = "/deliver"
-    def queueit(self, usr, bookid, separate):
+    def queueit(self, usr, bookid, separate, feedsId=None):
         param = {"u":usr.name, "id":bookid}
+        if feedsId:
+            param['feedsId'] = feedsId
         
-        if usr.merge_books and not separate:
-            self.queue2push[usr.name].append(str(bookid))
+        if usr.merge_books and not separate and not feedsId:
+            self.queue2push[usr.name].append(str(bookid)) #合并推送
         else:
-            taskqueue.add(url='/worker',queue_name="deliverqueue1",method='GET',
-                params=param,target="worker")
+            taskqueue.add(url='/worker', queue_name="deliverqueue1", method='GET',
+                params=param, target="worker")
         
     def flushqueue(self):
         for name in self.queue2push:
             param = {'u':name, 'id':','.join(self.queue2push[name])}
-            taskqueue.add(url='/worker',queue_name="deliverqueue1",method='GET',
-                params=param,target="worker")
+            taskqueue.add(url='/worker', queue_name="deliverqueue1", method='GET',
+                params=param, target="worker")
         self.queue2push = defaultdict(list)
         
     def GET(self):
         username = web.input().get('u')
-        id = web.input().get('id') #for debug
+        id_ = web.input().get('id')
+        feedsId = web.input().get('feedsId')
+        if id_:
+            id_ = [int(item) for item in id_.split('|') if item.isdigit()]
         
         self.queue2push = defaultdict(list)
         
         books = Book.all()
-        if username: #现在投递，不判断时间和星期
+        if username: #现在投递【测试使用】，不需要判断时间和星期
+            user = KeUser.all().filter("name = ", username).get()
+            if not user or not user.kindle_email:
+                return self.render('autoback.html', "Delivering", tips=_('The username not exist or the email of kindle is empty.'))
+
             sent = []
-            books2push = Book.get_by_id(int(id)) if id and id.isdigit() else None
-            books2push = [books2push] if books2push else books
+            if id_: #推送特定账号指定的书籍，这里不判断特定账号是否已经订阅了指定的书籍，只要提供就推送
+                books2push = [Book.get_by_id(item) for item in id_ if Book.get_by_id(item)]
+            else: #推送特定账号所有的书籍
+                books2push = [item for item in books if username in item.users]
+            
             for book in books2push:
-                if not id and username not in book.users:
-                    continue
-                user = KeUser.all().filter("name = ", username).get()
-                if user and user.kindle_email:
-                    self.queueit(user, book.key().id(), book.separate)
-                    sent.append(book.title)
+                self.queueit(user, book.key().id(), book.separate, feedsId)
+                sent.append(book.title)
             self.flushqueue()
+
             if len(sent):
                 tips = _("Book(s) (%s) put to queue!") % u', '.join(sent)
             else:
                 tips = _("No book to deliver!")
-            return self.render('autoback.html', "Delivering",tips=tips)
+
+            return self.render('autoback.html', "Delivering", tips=tips)
         
         #定时cron调用
         sentcnt = 0
@@ -110,3 +119,4 @@ class Deliver(BaseHandler):
                 sentcnt += 1
         self.flushqueue()
         return "Put <strong>%d</strong> books to queue!" % sentcnt
+        
